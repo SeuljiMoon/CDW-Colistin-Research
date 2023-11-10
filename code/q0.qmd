@@ -1,0 +1,404 @@
+---
+title: "Definition of study population"
+
+execute:
+    warning: false
+    freeze: auto
+theme:
+    light: flatly
+---
+
+
+```{r global-options, include=FALSE}
+# setting up environment
+knitr::opts_chunk$set(echo=TRUE, warning=FALSE, message=FALSE)
+
+if(!require("tidyverse")) install.packages("tidyverse")
+if(!require("data.table")) install.packages("data.table")
+if(!require("dplyr")) install.packages("dplyr")
+if(!require("lubridate")) install.packages("lubridate")
+if(!require("gtsummary")) install.packages("gtsummary")
+if(!require("DT")) install.packages("DT")
+if(!require("tidyr")) install.packages("tidyr")
+
+
+library(tidyverse)
+library(data.table)
+library(dplyr)
+library(lubridate)
+library(gtsummary)
+library(DT)
+library(tidyr)
+
+```
+
+## 1. Read Raw Medication information
+
+
+```{r}
+coli_drug <- read_csv("C:\\Users\\cmc\\Documents\\PIPET\\2. 연구\\9. CDW-Colistin\\Raw\\Colistin6_투약정보.csv",locale = locale("ko", encoding = "euc-kr"))
+
+colnames(coli_drug) <- c("RID", "drug_treat_date", "drug_treat_type", "durg_rx_date", "drug_depart",
+                         "drug_rx_code", "comp_name", "rx_name", "rx_name_k", "self_yn", 
+                         "drug_tcap_day", "drug_cap_unit", "drug_tquan_day", "drug_quan_unit", "drug_rs_freq",
+                         "drug_rx_days", "drug_adm_date", "adm_quan_once", "adm_num_days", "adm_term") 
+
+coli_drug <- coli_drug |> mutate(drug_treat_type = case_when(drug_treat_type == "외래" ~ 1,
+                                                             drug_treat_type == "입원" ~ 2, 
+                                                             drug_treat_type == "응급" ~ 3, 
+                                                           drug_treat_type == "DSC/CHEMO" ~ 4),
+                                 self_yn = ifelse(self_yn == "Y", 1,0),
+                                 drug_cap_unit = case_when(drug_cap_unit == "g" ~ 1,
+                                                           drug_cap_unit == "mg" ~ 2, 
+                                                           drug_cap_unit == "MIU" ~ 3, 
+                                                           drug_cap_unit == "만IU" ~ 4))
+
+coli_drug |> head(30) |> DT::datatable()
+
+```
+
+[![Variables](20231026_093420.png)]
+
+
+
+
+## 2. Study population
+
+
+연구대상자 : 2012년 1월 1일부터 2022년 12월 1일까지 Colistimethate inj.150mg (Colistimethate sodium)을 투여받은 사람들
+
+
+
+::: {.callout-important title="Detailed criteria"}
+- Colistin 약물을 1주일이상 연속적으로 투여받아야 함.
+- 동일한 대상자가 여러번 투여받았을 경우 (6개월 이상의 간격)에는 첫번째 투여 정보만 가져옴.
+- 투약 종료 후 6개월 이상 동안 투약정보가 없을 경우에 투약 종료로 판단함.
+:::
+
+
+
+1) 투약코드가 DW-COL150J (drug_rx_code = DW-COL150J) 데이터 추출 
+
+
+
+```{r}
+cms_rx <- coli_drug |> 
+  filter(drug_rx_code == "DW-COL150J") |> 
+  select(RID, drug_treat_date, durg_rx_date, adm_quan_once,adm_num_days, drug_rx_days, drug_adm_date, adm_term) 
+
+n_distinct(cms_rx$RID) # 1900
+
+cms_rx |> head(30) |> DT::datatable()
+```
+
+
+2) ID 별로 투약실시일자 (drug_adm_date) 오름차순으로 정렬후 투약날짜가 같을 경우 하나만 남김.  
+   1일총투여량 = (1회투여수량 * 1일투여횟수)
+   
+   
+
+```{r}
+cms_rx2 <- cms_rx |>
+  group_by(RID, drug_adm_date) |> 
+  arrange(RID, drug_adm_date) |> 
+  mutate(adm_quan_total = sum(adm_quan_once * adm_num_days),
+         drug_adm_ymd = as.Date(as.character(drug_adm_date), "%Y%m%d")) |> 
+  slice(1)
+
+cms_rx2 |> head(30) |> DT::datatable()
+```
+
+
+3) ID별로 직전값 가져온 후, 날짜 차이를 계산하고 날짜차이가 6개월 이상인 경우 그 이후 값 삭제
+
+
+
+```{r}
+cms_rx3 <- cms_rx2  |> 
+  group_by(RID) |> 
+  mutate(
+    adm_days = c(0, diff(drug_adm_ymd)),
+    gap_marker = ifelse(as.numeric(adm_days) > 180, 1, 0),
+    cumulative_gap = cumsum(gap_marker),
+    adm_term = difftime(max(drug_adm_ymd), min(drug_adm_ymd), units = "days")
+  )
+
+cms_rx3 |> head(30) |> DT::datatable()
+```
+
+
+**총투약기간 frequency table**
+
+
+```{r}
+cms_rx3 |> group_by(RID) |> 
+  slice(1) |> 
+  tbl_summary(include = adm_term,
+                       type = list(adm_term ~ "categorical")) |> 
+  as.data.table() |> 
+  DT::datatable()
+```
+
+
+4) 총 투약기간 7일 미만 대상자 삭제
+
+
+```{r}
+cms_rx4 <- cms_rx3 |> 
+  filter(cumulative_gap == 0) |> 
+  group_by(RID)  |> 
+  filter(as.numeric(adm_term) >= 7)  |> 
+  ungroup()
+
+n_distinct(cms_rx4$RID)
+
+cms_rx4 |> head(30) |> DT::datatable()
+
+```
+최종적으로 1900명의 colistin 투여 환자들 중 colistin을 일주일 미만으로 투여받은 환자(n = 621)는 제외하고  
+1279명이 남게되었음.
+
+
+5) 필요한 정보들만 남기기 
+
+
+* first_adm_date : 투약시작시점
+* last_adm_date : 투약종료시점
+* adm_term : 투약기간
+* total_adm_quan : 투약기간내 총투여량
+
+
+
+```{r}
+coli_pop <- cms_rx4 |>
+  group_by(RID) |>
+  summarise(
+    first_adm_date = min(drug_adm_ymd),
+    last_adm_date = max(drug_adm_ymd),
+    adm_term = difftime(max(drug_adm_ymd), min(drug_adm_ymd), units = "days"),
+    total_adm_quan = sum(adm_quan_total)
+  ) |> 
+  ungroup()
+
+# write.csv(coli_pop, "C:\\Users\\cmc\\Documents\\GitHub\\CDW-Colistin\\dataset\\COLI_POP.csv")
+
+coli_pop |>  head(30) |> DT::datatable() # n=1279
+```
+
+
+
+## 3. Exposure setting
+
+투여 시작 기준 3개월 이전부터 투약 종료 후 6개월 이후까지의 데이터가 필요함
+
+
+::: {.callout-important title="Detailed criteria"}
+- 투여시작시점 가장 가까운 정보 (time - fixed variable) : Demographics variables ...
+- 투약기간 동안 모든 정보가 필요 (time - varying variable) : Cr, Hct ...
+:::
+
+### 1) Demographics variables 1
+
+
+** 생년월일, 성별, 사망 정보 **
+
+* sex (0 : Female, 1: Male)
+* birth : 생년월일
+* death : 사망여부
+* death_date : 사망일자
+* end_follow_date : 최종추적일
+
+
+```{r}
+
+coli_coht <- read_csv("C:\\Users\\cmc\\Documents\\PIPET\\2. 연구\\9. CDW-Colistin\\Raw\\Colistin5_코호트.csv",locale = locale("ko", encoding = "euc-kr"))
+
+colnames(coli_coht) <- c("RID", "birth", "sex", "death", "death_date",
+                         "end_follow_date", "addr")
+
+coli_coht <- coli_coht |> mutate(sex = ifelse(sex == "F", 0, 1),
+                                 death = ifelse(death == "Y", 1, 0),
+                                 death_date = as.Date(as.character(death_date), "%Y%m%d"),
+                                 end_follow_date = as.Date(as.character(end_follow_date), "%Y%m%d")) |> 
+  select(RID, sex, birth, death, death_date, end_follow_date)
+
+coli_coht |> head(30) |> DT::datatable()
+
+# write.csv(coli_coht, "C:\\Users\\cmc\\Documents\\GitHub\\CDW-Colistin\\dataset\\COLI_COHT.csv")
+
+
+```
+
+### 2) Demographics variables 2
+
+
+** 키, 몸무게, 혈압, 흡연 (반복측정) **
+
+* record_date : 기록일자
+* height : 키
+* weight : 몸무게
+* dbp : 이완기혈압
+* sbp : 수축기혈압
+* smok_yn (1: 비흡연, 2: 과거흡연, 3:현재흡연, 4:확인불능)
+
+
+```{r}
+coli_base <- read_csv("C:\\Users\\cmc\\Documents\\PIPET\\2. 연구\\9. CDW-Colistin\\Raw\\Colistin1_기초임상정보.csv",locale = locale("ko", encoding = "euc-kr"))
+
+# colnames 
+colnames(coli_base) <- c("RID", "record_type", "base_date", "record_date", "height", "weight", "dbp", "sbp", "smok_yn" )
+coli_base <- coli_base |>
+  mutate(record_date = as.Date(as.character(record_date), "%Y%m%d"),
+         smok_yn = case_when(smok_yn == "비흡연" ~ 1,
+                             smok_yn == "과거흡연" ~ 2,
+                             smok_yn == "현재흡연" ~ 3, 
+                             smok_yn == "확인불능" ~ 4)) |> 
+  select(RID, record_date, height, weight, dbp, sbp, smok_yn)
+```
+
+투약시점에서 가장 가까운 정보들 가져오기
+
+```{r}
+coli_pop <- fread("C:\\Users\\cmc\\Documents\\GitHub\\CDW-Colistin\\dataset\\COLI_POP.csv")
+
+coli_demo <- left_join(coli_base, coli_pop, by = "RID")
+
+# 함수 정의: 각 변수에 대해 가장 가까운 날짜의 NA가 아닌 값을 선택
+get_closest_value <- function(record_dates, values, adm_date){
+  non_na_dates <- record_dates[!is.na(values)]
+  non_na_values <- values[!is.na(values)]
+  
+  if(length(non_na_dates) == 0){
+    return(NA)
+  }
+  
+  differences <- abs(as.Date(non_na_dates) - as.Date(adm_date))
+  closest_date_index <- which.min(differences)
+  return(non_na_values[closest_date_index])
+}
+
+coli_demo <- coli_demo %>%
+  group_by(RID) %>%
+  summarise(
+    closest_height = get_closest_value(record_date, height, first_adm_date),
+    closest_weight = get_closest_value(record_date, weight, first_adm_date),
+    closest_dbp = get_closest_value(record_date, dbp, first_adm_date),
+    closest_sbp = get_closest_value(record_date, sbp, first_adm_date),
+    closest_smok_yn = get_closest_value(record_date, smok_yn, first_adm_date),
+    .groups = 'drop'
+  )
+
+# write.csv(coli_demo, "C:\\Users\\cmc\\Documents\\GitHub\\CDW-Colistin\\dataset\\COLI_DEMO.csv")
+
+```
+
+
+### 3) CCI - 진단정보
+
+
+** Comorbidities **
+
+```{r}
+coli_diag <- read_csv("C:\\Users\\cmc\\Documents\\PIPET\\2. 연구\\9. CDW-Colistin\\Raw\\Colistin4_진단정보.csv",locale = locale("ko", encoding = "euc-kr"))
+str(coli_diag)
+
+# colnames 
+colnames(coli_diag) <- c("RID", "initial_dx_age", "dx_date", "initial_dx_date", "dx_depart",
+                        "dx_code", "dx_name", "dx_name_k", "dx_treat_type", "initial_dx_date_nU", 
+                        "initial_dx_date_s", "dx_CR", "dx_MS")
+
+str(coli_diag)
+
+
+coli_diag <- coli_diag |> mutate(initial_dx_date = as.Date(as.character(initial_dx_date), "%Y%m%d"),
+                                 dx_treat_type = case_when(dx_treat_type == "외래" ~ 1,
+                                                           dx_treat_type == "입원" ~ 2, 
+                                                           dx_treat_type == "응급" ~ 3, 
+                                                           dx_treat_type == "DSC/CHEMO" ~ 4),
+                                 dx_CR = ifelse(dx_CR == "C", 1, 2),
+                                 dx_MS = ifelse(dx_MS == "M", 1, 2))
+
+```
+
+최초진단날짜를 기준으로 진단일 정의하고 주진단 1회 이상 혹은 부진단 2회 이상일 경우만 남김.
+투약시점 이전 prior disease condition (CCI 정의)
+
+```{r}
+coli_cci <- left_join(coli_diag[,c("RID", "initial_dx_age", "initial_dx_date", "dx_code", "dx_name", "dx_MS")], coli_pop[,c("RID", "first_adm_date", "last_adm_date")], by = "RID")
+
+coli_cci2 <- coli_cci |> 
+  group_by(RID,initial_dx_date, dx_code, dx_MS) |> 
+  mutate(count = n(),
+         dx_code4=sub("\\..*", "", dx_code)) |> 
+  ungroup() |> 
+  filter((dx_MS == 1) | (dx_MS == 2 & count > 1)) |> 
+  distinct(RID, initial_dx_date, dx_code, dx_MS, .keep_all = TRUE) |>   # Remove duplicate rows 
+  filter(initial_dx_date < first_adm_date)
+
+n_distinct(coli_demo$RID) #1279
+```
+
+
+- All prior diseases table
+
+```{r}
+coli_cci2 |> 
+  tbl_summary(include = dx_code4,
+                       type = list(dx_code4 ~ "categorical")) |> 
+  as.data.table() |> 
+  DT::datatable()
+
+```
+
+- Define Prior diseases used Charlson Comorbidity Index (CCI)
+
+
+```{r}
+# Read CCI information dataset
+cci_list <- fread("C:\\Users\\cmc\\Documents\\GitHub\\CDW-Colistin\\dataset\\CCI_INFO.csv")
+
+# cci_list를 사용하여 각 Disease 별로 코드 목록을 만듭니다.
+disease_codes <- cci_list %>% 
+  group_by(Disease) %>% 
+  summarise(Codes = list(`ICD-10-code`)) %>% 
+  ungroup()
+
+
+# 새로운 지표 데이터 프레임을 초기화합니다.
+indicator_data <- data.frame(RID = unique(coli_cci2$RID))
+for(disease in disease_codes$Disease) {
+  indicator_data[[disease]] <- 0
+}
+
+# 각 RID와 Disease에 대한 코드 목록을 순회하면서 질병 코드를 체크합니다.
+for(i in 1:nrow(coli_cci2)) {
+  for(j in 1:nrow(disease_codes)) {
+    disease <- disease_codes$Disease[j]
+    codes <- disease_codes$Codes[[j]]
+    current_code <- coli_cci2$dx_code[i]
+    # 해당 질병 코드 목록에 현재 코드가 있는지 확인합니다.
+    if(any(str_detect(current_code, paste0('^', codes)))) {
+      # 지표 데이터 프레임에 해당 질병이 있음을 표시합니다.
+      indicator_data[coli_cci2$RID[i] == indicator_data$RID, disease] <- 1
+    }
+  }
+}
+
+# 중복을 제거하여 각 RID별로 하나의 행만 가지는 데이터 프레임을 생성합니다.
+coli_cci2_unique <- coli_cci2 %>%
+  select(RID, initial_dx_age, initial_dx_date) %>%
+  distinct(RID, .keep_all = TRUE)
+
+# 지표 데이터 프레임을 병합합니다.
+final_data <- left_join(coli_cci2_unique, indicator_data, by = "RID")
+
+# 결과 확인
+print(final_data)
+```
+
+
+
+
+
+
+
